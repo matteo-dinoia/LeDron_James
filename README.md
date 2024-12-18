@@ -16,8 +16,8 @@ Add this dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-drone = { path = "src/drone" }
-
+drone = { path = "src/drone" } 
+```
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
