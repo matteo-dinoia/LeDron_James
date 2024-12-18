@@ -16,7 +16,7 @@ Add this dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-drone = { git = "https://github.com/anass03/LeDron_James.git" }
+LeDron-James = { git = "https://github.com/anass03/LeDron_James.git" }
 ```
 ## License
 
