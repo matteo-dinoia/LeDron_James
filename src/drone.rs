@@ -335,7 +335,7 @@ impl Drone {
                         old_srh = old_srh.sub_route(0..=old_srh.hop_index).unwrap();
                         old_srh.reverse();
                         old_srh.hop_index=1;
-                        println!("Building Nack [{:?}]...", nack_id);
+                        //println!("Building Nack [{:?}]...", nack_id);
                         old_srh
                     },
                 pack_type: PacketType::Nack(Nack{
@@ -373,7 +373,7 @@ impl Drone {
                                 SendingCodes::SuccessfullySent(packet.session_id)
                             },
                             Err(er) => {
-                                println!("Drone ID {:?} - {:?}", self.id, er.to_string());
+                                self.log(format!("{}", er.to_string()));
                                 let _ = self.sendto_controller(packet, true); // We send the packet to Sim.Controller
                                 SendingCodes::ErrorSending(er.to_string())
                             }
@@ -401,7 +401,7 @@ impl Drone {
                     Ok(())
                 },
                 Err(er) => {
-                    println!("Drone ID {} - {:?}", self.id, er.to_string());
+                    self.log(format!("{}", er.to_string()));
                     Err(er.to_string())
                 }
             }
@@ -412,7 +412,7 @@ impl Drone {
                     Ok(())
                 },
                 Err(er) => {
-                    println!("Drone ID {} - {:?}", self.id, er.to_string());
+                    self.log(format!("{}", er.to_string()));
                     Err(er.to_string())
                 }
             }
