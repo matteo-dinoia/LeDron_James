@@ -7,6 +7,7 @@ use wg_2024::controller::*;
 use wg_2024::controller::DroneEvent::{PacketSent,PacketDropped};
 use wg_2024::network::*;
 use wg_2024::packet::NackType::{Dropped, ErrorInRouting, UnexpectedRecipient};
+
 pub enum SendingCodes{ // For performance and logic enhancements
     SuccessfullySent(u64),
     ErrorSending(String),
@@ -73,19 +74,11 @@ impl wg_2024::drone::Drone for Drone {
                 recv(self.controller_recv) -> command => {
                     if let Ok(command) = command {
                         self.handle_command(command);
-                    }else{
-                        self.log("Failed to parse command-packet [Crossbeam Error -> Channel Closed / Empty]");
                     }
                 }
                 recv(self.packet_recv) -> packet => {
                     self.drone_behaviour(packet);
                 }
-                /*
-                default => {
-                    self.log("Waiting for messages...");
-                    thread::sleep(Duration::from_millis(2000));
-                }
-                 */
             }
         }
     }
@@ -96,13 +89,12 @@ impl Drone {
     }
     fn drone_behaviour(&mut self, packet:Result<Packet, crossbeam_channel::RecvError>){
         if self.cache.crashed{
-            if !self.packet_recv.is_empty(){
-                // We gotta empty the queue
-                if let Ok(packet) = packet {
-                    // Only Ack, Nack, FloodResponse already sent
-                    // before the drone-crash will be forwarded
-                    // during a crashing status.
-                    match packet.clone().pack_type{
+            // We gotta empty the queue
+            if let Ok(mut packet) = packet {
+                // Only Ack, Nack, FloodResponse already sent
+                // before the drone-crash will be forwarded
+                // during a crashing status.
+                match packet.clone().pack_type{
                         PacketType::Nack(_) |
                         PacketType::Ack(_) |
                         PacketType::FloodResponse(_) => {
@@ -111,17 +103,16 @@ impl Drone {
                         // This the case of Flood Request / Fragment message:
                         PacketType::FloodRequest(_) => {
                             self.log("Dropping packet...");
-                            self.send_packet(Self::build_packet_nack(packet, Dropped, None), None);
+                            self.send_packet(Self::build_packet_nack(packet, ErrorInRouting(self.id), None), None);
                         },
                         PacketType::MsgFragment(fragment_id) => {
                             self.log("Dropping packet...");
-                            self.send_packet(Self::build_packet_nack(packet, Dropped, Some(fragment_id.fragment_index)), None);
+                            self.send_packet(Self::build_packet_nack(packet, ErrorInRouting(self.id), Some(fragment_id.fragment_index)), None);
                         }
                     }
-                }else{
+                }else {
                     self.log("Failed to parse command-packet [Crossbeam Error -> Channel Closed / Empty]");
                 }
-            }
         }else{
             if let Ok(packet) = packet {
                 self.handle_packet(packet);
@@ -157,19 +148,19 @@ impl Drone {
                         self.send_packet(return_packet, None);
                     },
                     _ => { // It never happens
-                        println!("Unknown packet [Probably Flooding-Request error-handling / NON SUPPORTED PACKET-TYPE!]");
+                        self.log("Unknown packet [Probably Flooding-Request error-handling / NON SUPPORTED PACKET-TYPE!]");
                     },
                 }
             }
             RoutingCodes::DestinationArrived => {
                 // Check if it's an FloodingReq, if not, build an Nack, a Drone can't receive messages!
-                println!("Drone ID {} - Packet with Drone destination arrived...", self.id);
+                self.log("Packet with Drone destination arrived...");
                 match packet.pack_type.clone() {
                     PacketType::FloodRequest(packet_id) => {
                         self.handle_flooding_req(packet_id, packet);
                     },
                     _ => { // DestinationIsDrone
-                        println!("{:?}", self.send_packet(Self::build_packet_nack(packet, NackType::DestinationIsDrone ,None),None));
+                        self.log(format!("{:?}", self.send_packet(Self::build_packet_nack(packet, NackType::DestinationIsDrone ,None),None)).as_str());
                     }
                 }
             }
@@ -180,7 +171,7 @@ impl Drone {
                             self.send_packet(Self::build_packet_nack(packet.clone(), ErrorInRouting(packet.routing_header.hops[packet.routing_header.hop_index]), Some(fragment_id.fragment_index)), None);
                         }else{
                             // SRH Received is not valid, I can't send back a Nack as I might have to guess where it did come from, fuck the drone before :(
-                            println!("Drone ID {} - Discarding packet [SESSION ID: {:?}] because it has an unknown SRH (OUB)", self.id, packet.session_id);
+                            self.log(format!("Discarding packet [SESSION ID: {:?}] because it has an unknown SRH (OUB)",packet.session_id));
                             let _ = self.sendto_controller(Self::build_packet_nack(packet.clone(), UnexpectedRecipient(self.id), None),false); // As we asked the WGC what to do in this case, we just got told to send to controller an UnexpectedRecipient Nack with the drone self.id.
                         }
                     },
@@ -192,7 +183,7 @@ impl Drone {
                             self.send_packet(Self::build_packet_nack(packet.clone(), ErrorInRouting(packet.routing_header.hops[packet.routing_header.hop_index]), None), None);
                         }else{
                             // SRH Received is not valid, I can't send back a Nack as I might have to guess where it did come from, fuck the drone before :(
-                            println!("Drone ID {} - Discarding packet [SESSION ID: {:?}] because it has an unknown SRH (OUB)", self.id, packet.session_id);
+                            self.log(format!("Discarding packet [SESSION ID: {:?}] because it has an unknown SRH (OUB)", packet.session_id));
                             let _ = self.sendto_controller(Self::build_packet_nack(packet.clone(), UnexpectedRecipient(self.id), None),false); // As we asked the WGC what to do in this case, we just got told to send to controller an UnexpectedRecipient Nack with the drone self.id.
                         }
                     },
@@ -201,15 +192,15 @@ impl Drone {
         }
     }
     fn handle_command(&mut self, command:DroneCommand){
-        println!("Drone ID {} - Handling commands...", self.id);
+        self.log("Handling commands...");
         match command {
             DroneCommand::Crash => {
                 if self.cache.crashed{
                     self.cache.crashed = false;
-                    println!("Drone ID {:?} - Uncrashed the drone, restore manually the connections to revive!", self.id)
+                    self.log("Uncrashed the drone, restore manually the connections to revive!")
                 }else{
                     self.cache.crashed = true;
-                    println!("Drone ID {:?} - Crashed the drone, Simulation Controller deleting the connection!", self.id)
+                    self.log("Crashed the drone, Simulation Controller deleting the connection!");
                 }
             },
             DroneCommand::SetPacketDropRate(newpdr) => {
@@ -217,14 +208,14 @@ impl Drone {
             },
             DroneCommand::AddSender(nodeid, senderchannel) => {
                 match self.packet_send.insert(nodeid, senderchannel){
-                    Some(_) => { println!("Drone ID {:?} - Added sender channel", self.id); },
-                    None => { println!("Drone ID {:?} - Failed to add sender channel", self.id); }
+                    Some(_) => { self.log("Added sender channel"); },
+                    None => { self.log("Failed to add sender channel"); }
                 }
             }
             DroneCommand::RemoveSender(nodeid) => {
                 match self.packet_send.remove(&nodeid){
-                    Some(_) => { println!("Drone ID {:?} - Successfully removed!", self.id) },
-                    None => { println!("Drone ID {:?} - Failed to remove sender!", self.id) }
+                    Some(_) => { self.log("Successfully removed!") },
+                    None => { self.log("Failed to remove sender!") }
                 }
             }
         }
@@ -232,7 +223,7 @@ impl Drone {
 
     // Return - Codes are wrote on the first lines
     fn handle_routing_header(&self, srh: &SourceRoutingHeader)->RoutingCodes{
-        println!("Drone ID {} - Handling routing header...", self.id);
+        self.log("Handling routing header...");
         if srh.valid_hop_index(){
             if srh.is_last_hop(){
                 RoutingCodes::DestinationArrived
@@ -258,7 +249,7 @@ impl Drone {
                 self.send_packet(Self::build_packet_flood_response(packet_id, packet.session_id),None);
             }else{
                 let packetreceivedfrom = packet_id.path_trace.get(packet_id.path_trace.len()-1usize)
-                    .expect(("Drone ID ".to_string()+self.id.to_string().as_str()+" - Received Flood Request with empty path-trace!").as_str()).clone();
+                    .expect(("LeDron ID ".to_string()+self.id.to_string().as_str()+" - Received Flood Request with empty path-trace!").as_str()).clone();
                 floods_sent.push(packet_id.flood_id.clone()); // **
                 let return_packet = Packet{
                     session_id: packet.session_id,
@@ -278,7 +269,7 @@ impl Drone {
             }
         }else{
             let packetreceivedfrom = packet_id.path_trace.get(packet_id.path_trace.len()-1usize)
-                .expect(("Drone ID ".to_string()+self.id.to_string().as_str()+" - Received Flood Request with empty path-trace!").as_str()).clone();
+                .expect(("LeDron ID ".to_string()+self.id.to_string().as_str()+" - Received Flood Request with empty path-trace!").as_str()).clone();
             self.cache.history_floodreq.insert(packet_id.initiator_id.clone(), vec![packet_id.flood_id.clone()]); // **
             let return_packet = Packet{
                 session_id: packet.session_id,
@@ -309,7 +300,6 @@ impl Drone {
             packet
         }else{
             // Genero un nack e lo rimando dove è tornato
-            packet.routing_header.sub_route(packet.routing_header.hop_index.clone()..0);
             let mut opt: Option<u64> = None;
             match &packet.pack_type{
                 PacketType::MsgFragment(fragm) => opt=Some(fragm.fragment_index),
@@ -335,7 +325,6 @@ impl Drone {
             },
             session_id: srcid// random number or session id from the old packet?,
         };
-        println!("Drone ID {} - Building Flood Response", return_packet.routing_header.hops[0]);
         return_packet
     }
     fn build_packet_nack(packet: Packet, nack_id: NackType, optional_fragment_index: Option<u64>)-> Packet{
@@ -346,7 +335,7 @@ impl Drone {
                         old_srh = old_srh.sub_route(0..=old_srh.hop_index).unwrap();
                         old_srh.reverse();
                         old_srh.hop_index=1;
-                        println!("Drone ID {:?} - Building Nack [{:?}]...", old_srh.hops[0], nack_id);
+                        println!("Building Nack [{:?}]...", nack_id);
                         old_srh
                     },
                 pack_type: PacketType::Nack(Nack{
@@ -367,7 +356,7 @@ impl Drone {
                         SendingCodes::SuccessfullySent(packet.session_id)
                     },
                     Err(er) => {
-                        println!("Drone ID {:?} - {:?}", self.id, er.to_string());
+                        self.log(format!("{:?}", er.to_string()));
                         let _ = self.sendto_controller(packet, false); // We send the packet to Sim.Controller
                         SendingCodes::ErrorSending(er.to_string())
                     }
